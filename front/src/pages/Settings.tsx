@@ -570,6 +570,56 @@ export function SettingsPage({ section = "registration" }: { section?: SettingsS
                 helper="支持无认证或用户名/密码认证的 HTTP(S) 代理；凭据含 @、:、/、#、% 等特殊字符时请使用 URL 百分号编码，例如 @ 写成 %40。注册浏览器与 xAI/OAuth 请求会共用此代理。"
               />
             </div>
+            <div className="space-y-3 sm:col-span-2">
+              <ToggleRow
+                title="按任务轮换代理身份（本地魔改）"
+                description="在「网络代理」的用户名处写 {account} 占位符，并开启本开关：每个注册任务会替换成身份池里的下一条身份，任务之间换身份 = 换出口 IP；同一个任务全程共用一条身份（浏览器、验证码、SSO 校验都在同一 IP）。"
+                checked={!!config.register_proxy_identity_rotation}
+                onCheckedChange={(value) =>
+                  setField("register_proxy_identity_rotation", value)
+                }
+              />
+              {config.register_proxy_identity_rotation ? (
+                <div className="rounded-xl border border-dashed bg-muted/25 px-3 py-3 text-xs leading-5 text-muted-foreground sm:px-4">
+                  <div className="font-medium text-foreground">身份池</div>
+                  <div className="mt-1 space-y-2">
+                    <div className="min-w-0 space-y-1">
+                      <Label htmlFor="register_proxy_identity_pool" className="text-xs">
+                        身份清单（每行一条，留空则自动生成）
+                      </Label>
+                      <textarea
+                        id="register_proxy_identity_pool"
+                        className="min-h-[92px] w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                        placeholder={"grok-reg-001\ngrok-reg-002\ngrok-reg-003"}
+                        value={String(config.register_proxy_identity_pool ?? "")}
+                        onChange={(event) =>
+                          setField("register_proxy_identity_pool", event.target.value)
+                        }
+                      />
+                    </div>
+                    <div className="min-w-0 space-y-1">
+                      <Label htmlFor="register_proxy_identity_base" className="text-xs">
+                        自动生成的基准名（清单为空时使用）
+                      </Label>
+                      <Input
+                        id="register_proxy_identity_base"
+                        value={String(config.register_proxy_identity_base ?? "")}
+                        placeholder="grok-reg"
+                        onChange={(event) =>
+                          setField("register_proxy_identity_base", event.target.value)
+                        }
+                      />
+                    </div>
+                  </div>
+                  <ul className="mt-2 list-disc space-y-0.5 pl-4">
+                    <li>留空身份清单 → 自动生成 <span className="font-mono">{config.register_proxy_identity_base || "grok-reg"}-1</span> 到 <span className="font-mono">-500</span>，用完后从头循环</li>
+                    <li>身份写进代理用户名的 <span className="font-mono">Platform.Account</span>，例如 resin：<span className="font-mono break-all">http://1024Proxy-5m.{"{account}"}:TOKEN@host:50001</span></li>
+                    <li>开关关闭，或代理里没有 <span className="font-mono">{"{account}"}</span> → 所有任务共用一个出口 IP（与原版行为一致）</li>
+                    <li>代理池粘性由供给侧（如 resin）维持，身份清单本身不会过期</li>
+                  </ul>
+                </div>
+              ) : null}
+            </div>
             <div className="min-w-0 space-y-2">
               <Label htmlFor="browser_engine">浏览器后端</Label>
               <Select
