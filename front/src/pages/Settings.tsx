@@ -998,14 +998,41 @@ export function SettingsPage({ section = "registration" }: { section?: SettingsS
             </div>
           </CardHeader>
           <CardContent className="grid gap-4 sm:grid-cols-2">
-            <div className="sm:col-span-2">
+            <div className="space-y-3 sm:col-span-2">
+              <ToggleRow
+                title="使用标签管理邮箱占用（本地魔改）"
+                description="取号只挑「不带任何 Grok-* 标签」的邮箱；取到时写「Grok-使用中」；注册结束写「Grok-成功」或「Grok-失败」。开启后不再修改平台 status（与原「CPA 成功后停用」互斥，本开关优先）。"
+                checked={!!config.outlookemail_use_tags}
+                onCheckedChange={(value) => setField("outlookemail_use_tags", value)}
+              />
+              {config.outlookemail_use_tags ? (
+                <div className="rounded-xl border border-dashed bg-muted/25 px-3 py-3 text-xs leading-5 text-muted-foreground sm:px-4">
+                  <div className="font-medium text-foreground">
+                    标签口径（前缀 {config.outlookemail_tag_prefix || "Grok-"}）
+                  </div>
+                  <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                    <li><span className="font-medium">Grok-使用中</span>：已被某次注册任务原子占用（平台 claim），崩溃悬挂也能安全复用</li>
+                    <li><span className="font-medium">Grok-成功</span>：注册成功并已导入 Grok2API，作为邮箱质量台账保留</li>
+                    <li><span className="font-medium">Grok-失败</span>：消耗性失败（账号已注册 / 注册风控 / SSO 超时 / 验证码超时）</li>
+                    <li>取号判据 = 以上标签皆无；平台 <span className="font-mono">status</span> 全程不变（仍为 <span className="font-mono">active</span>）</li>
+                  </ul>
+                  <div className="mt-1.5">
+                    账号级降智/风控判定不在这里：由 GrokIQ 通过注册联动探针处理，邮箱标签只记录「邮箱质量」。
+                  </div>
+                </div>
+              ) : null}
               <ToggleRow
                 title="CPA 成功后停用 Outlook 邮箱"
-                description="仅 accounts 来源生效；CPA 成功、账号已注册、注册风控或 SSO 超时后都会把邮箱更新为 inactive"
+                description={
+                  config.outlookemail_use_tags
+                    ? "已被「使用标签管理邮箱占用」接管：标签模式下不修改平台 status，此开关已禁用"
+                    : "仅 accounts 来源生效；CPA 成功、账号已注册、注册风控或 SSO 超时后都会把邮箱更新为 inactive"
+                }
                 checked={!!config.outlookemail_disable_after_cpa_success}
                 onCheckedChange={(value) =>
                   setField("outlookemail_disable_after_cpa_success", value)
                 }
+                disabled={!!config.outlookemail_use_tags}
               />
             </div>
             <ConfigField {...fieldState}
