@@ -1115,6 +1115,10 @@ def get_outlookemail_code_timeout_group_id() -> str:
 
 
 def list_outlookemail_groups() -> list[dict]:
+    """读取分组；标签模式下附带每个分组的「可用」账号数（不带 Grok-* 标签）。"""
+    available_prefix = ""
+    if bool(config.get("outlookemail_use_tags", False)):
+        available_prefix = str(config.get("outlookemail_tag_prefix", "") or "").strip() or outlookemail_provider.DEFAULT_TAG_PREFIX
     return outlookemail_provider.list_groups(
         http_get,
         direct_http_session,
@@ -1123,6 +1127,7 @@ def list_outlookemail_groups() -> list[dict]:
         web_password=str(config.get("outlookemail_web_password", "") or ""),
         session_cookie=str(config.get("outlookemail_session_cookie", "") or "").strip(),
         proxies={},
+        available_prefix=available_prefix,
     )
 
 

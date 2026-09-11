@@ -56,6 +56,50 @@ class TagPredicateTests(unittest.TestCase):
         self.assertEqual(outlook_pool.tag_names(item), {"Grok-成功", "Grok-使用中"})
 
 
+class GroupAvailabilityTests(unittest.TestCase):
+    """分组下拉列表的「可用/总数」口径。"""
+
+    def _accounts(self):
+        return [
+            {**account("a@x.com"), "group_id": 4, "group_name": "g4"},
+            {**account("b@x.com", ["Grok-成功"]), "group_id": 4, "group_name": "g4"},
+            {**account("c@x.com", ["Grok-使用中"]), "group_id": 4, "group_name": "g4"},
+            {**account("d@x.com", ["其他-已用"]), "group_id": 5, "group_name": "g5"},
+            {**account("e@x.com", ["Grok-失败"]), "group_id": 5, "group_name": "g5"},
+        ]
+
+    def test_counts_only_untagged_accounts(self):
+        counts = outlook_pool.availability_counts(self._accounts(), "Grok-")
+        self.assertEqual(counts, {4: 1, 5: 1})
+
+    def test_empty_prefix_skips_counting(self):
+        self.assertEqual(outlook_pool.availability_counts(self._accounts(), ""), {})
+        self.assertEqual(outlook_pool.availability_counts(self._accounts(), "   "), {})
+
+    def test_groups_from_accounts_exposes_available_and_total(self):
+        with mock.patch.object(outlook_pool, "get_accounts", lambda *_a, **_k: self._accounts()):
+            groups = outlook_pool._groups_from_accounts(None, "http://x", "key", available_prefix="Grok-")
+        by_id = {group["id"]: group for group in groups}
+        self.assertEqual(by_id[4]["account_count"], 3)
+        self.assertEqual(by_id[4]["available_count"], 1)
+        self.assertEqual(by_id[5]["account_count"], 2)
+        self.assertEqual(by_id[5]["available_count"], 1)
+
+    def test_groups_without_prefix_report_none(self):
+        with mock.patch.object(outlook_pool, "get_accounts", lambda *_a, **_k: self._accounts()):
+            groups = outlook_pool._groups_from_accounts(None, "http://x", "key")
+        self.assertTrue(all(group["available_count"] is None for group in groups))
+
+    def test_group_with_only_tagged_accounts_still_reports_total(self):
+        # g6 共 2 个、可用 1 个：下拉里能看出「这个分组还剩多少能取」
+        accounts = [
+            {**account("f@x.com"), "group_id": 6, "group_name": "g6"},
+            {**account("g@x.com", ["Grok-成功"]), "group_id": 6, "group_name": "g6"},
+        ]
+        counts = outlook_pool.availability_counts(accounts, "Grok-")
+        self.assertEqual(counts, {6: 1})
+
+
 class AcquireWithTagsTests(unittest.TestCase):
     def _acquire(self, accounts, claim_results, **kwargs):
         calls = []

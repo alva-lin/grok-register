@@ -769,17 +769,55 @@ def serialize_group(item: Any) -> dict | None:
         "id": group_id,
         "name": name,
         "account_count": max(0, account_count),
+        # 「可用数」只有走 API Key 的账号列表统计得出来；走网页分组接口时为 None。
+        "available_count": None,
         "is_system": is_system,
     }
+
+
+def _attach_available_counts(groups: dict[int, dict], counts: dict[int, int], prefix: str) -> None:
+    """把「可用数」写进已聚合的分组对象。
+
+    未启用标签模式（``prefix`` 为空）时保持 ``None``：前端据此回退到只显示总数。
+    启用了就记 0，这样「这个分组已经取不出号了」在下拉里看得出来。
+    """
+    if not str(prefix or "").strip():
+        return
+    for group_id, group in groups.items():
+        group["available_count"] = max(0, int(counts.get(group_id, 0)))
+
+
+def availability_counts(accounts: List[dict], prefix: str) -> dict[int, int]:
+    """按分组统计「可用」账号数。
+
+    可用 = 不带任何 ``prefix`` 前缀标签的账号（标签模式下的取号判据）。
+    前缀为空时返回空字典，调用方据此跳过统计。
+    """
+    normalized_prefix = str(prefix or "").strip()
+    if not normalized_prefix:
+        return {}
+    counts: dict[int, int] = {}
+    for item in accounts:
+        if not isinstance(item, dict):
+            continue
+        if not item_has_no_prefixed_tag(item, normalized_prefix):
+            continue
+        group_id = parse_group_id(item.get("group_id"))
+        if group_id is None:
+            continue
+        counts[group_id] = counts.get(group_id, 0) + 1
+    return counts
 
 
 def _groups_from_accounts(
     http_get: HttpGet,
     api_base: str,
     api_key: str,
+    available_prefix: str = "",
 ) -> List[dict]:
     grouped: dict[int, dict] = {}
-    for item in get_accounts(http_get, api_base, api_key):
+    accounts = get_accounts(http_get, api_base, api_key)
+    for item in accounts:
         group_id = parse_group_id(item.get("group_id"))
         if group_id is None:
             continue
@@ -797,6 +835,7 @@ def _groups_from_accounts(
                 grouped[group_id] = serialized
             continue
         current["account_count"] = int(current.get("account_count") or 0) + 1
+    _attach_available_counts(grouped, availability_counts(accounts, available_prefix), available_prefix)
     return [grouped[key] for key in sorted(grouped)]
 
 
@@ -809,8 +848,13 @@ def list_groups(
     web_password: str = "",
     session_cookie: str = "",
     proxies: Optional[dict] = None,
+    available_prefix: str = "",
 ) -> List[dict]:
-    """读取 OutlookEmail 分组，优先走管理页 /api/groups，便于包含空分组。"""
+    """读取 OutlookEmail 分组，优先走管理页 /api/groups，便于包含空分组。
+
+    ``available_prefix`` 非空时（标签模式），额外统计每个分组里「不带该前缀
+    标签」的账号数，作为下拉列表的「可用」口径。
+    """
     password = str(web_password or "")
     manual_cookie = str(session_cookie or "").strip()
     if password or manual_cookie:
@@ -822,7 +866,7 @@ def list_groups(
             proxies=proxies,
         )
     if str(api_key or "").strip():
-        return _groups_from_accounts(http_get, api_base, api_key)
+        return _groups_from_accounts(http_get, api_base, api_key, available_prefix=available_prefix)
     raise Exception("OutlookEmail 获取分组需要配置网页登录密码或 API Key")
 
 

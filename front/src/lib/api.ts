@@ -258,6 +258,8 @@ export type OutlookEmailGroup = {
   id: number;
   name: string;
   account_count: number;
+  /** 标签模式下的「可用」账号数（不带 Grok-* 标签）；非标签模式或走网页分组接口时为 null。 */
+  available_count?: number | null;
   is_system: boolean;
 };
 
