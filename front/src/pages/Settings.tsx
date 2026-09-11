@@ -285,7 +285,11 @@ function CloudflareHelp() {
   );
 }
 
-function outlookGroupLabel(group: OutlookEmailGroup) {
+function outlookGroupLabel(group: OutlookEmailGroup, showAvailable: boolean) {
+  const available = group.available_count;
+  if (showAvailable && typeof available === "number") {
+    return `${group.name}（可用 ${available} / 共 ${group.account_count}）`;
+  }
   return `${group.name}（${group.account_count}）`;
 }
 
@@ -298,6 +302,7 @@ function OutlookGroupSelect({
   onFieldChange,
   groups,
   loading,
+  showAvailable = false,
 }: {
   label: string;
   field: string;
@@ -307,6 +312,7 @@ function OutlookGroupSelect({
   onFieldChange: (key: string, value: any) => void;
   groups: OutlookEmailGroup[];
   loading: boolean;
+  showAvailable?: boolean;
 }) {
   const value = String(config[field] ?? "");
   const options = groups.filter((group) => !group.is_system || String(group.id) === value);
@@ -324,7 +330,7 @@ function OutlookGroupSelect({
         {hasCurrent ? null : <option value={value}>{`分组 ${value}（未找到）`}</option>}
         {options.map((group) => (
           <option key={group.id} value={String(group.id)}>
-            {outlookGroupLabel(group)}
+            {outlookGroupLabel(group, showAvailable)}
           </option>
         ))}
       </Select>
@@ -1068,6 +1074,7 @@ export function SettingsPage({ section = "registration" }: { section?: SettingsS
               emptyLabel="全部"
               groups={outlookGroups}
               loading={outlookGroupsLoading}
+              showAvailable={!!config.outlookemail_use_tags}
             />
             <OutlookGroupSelect
               {...fieldState}
@@ -1076,7 +1083,13 @@ export function SettingsPage({ section = "registration" }: { section?: SettingsS
               emptyLabel="不移动"
               groups={outlookGroups}
               loading={outlookGroupsLoading}
+              showAvailable={!!config.outlookemail_use_tags}
             />
+            {config.outlookemail_use_tags ? (
+              <p className="sm:col-span-2 text-xs leading-5 text-muted-foreground">
+                「可用」= 该分组里不带任何 {config.outlookemail_tag_prefix || "Grok-"} 前缀标签的邮箱数（也就是还能取号的）；「共」= 分组邮箱总数。数量按当前标签快照统计，点「刷新分组」可重新拉取。
+              </p>
+            ) : null}
             <div className="sm:col-span-2 flex flex-wrap items-center gap-2">
               <Button type="button" variant="outline" size="sm" onClick={() => void loadOutlookGroups()} disabled={outlookGroupsLoading}>
                 <RefreshCw className={`h-3.5 w-3.5 ${outlookGroupsLoading ? "animate-spin" : ""}`} aria-hidden="true" />
