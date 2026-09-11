@@ -395,6 +395,104 @@ def _account_id_for_email(account: dict, email: str) -> int:
         raise Exception(f"OutlookEmail 账号缺少有效 ID: {email}")
 
 
+# ==================== 标签模式（本地魔改） ====================
+# 取号判据是「不带任何 <prefix>* 标签」；占用写「<prefix>使用中」；结束写「<prefix>成功/失败」。
+# 平台侧 status 一律不改，邮箱台账保持 成功/失败 的纯净口径。
+DEFAULT_TAG_PREFIX = "Grok-"
+_tag_client_lock = threading.RLock()
+_tag_client: Any = None
+
+
+def tag_names(item: Any) -> set[str]:
+    """取出账号对象上的标签名集合。"""
+    if not isinstance(item, dict):
+        return set()
+    tags = item.get("tags")
+    if not isinstance(tags, list):
+        return set()
+    names: set[str] = set()
+    for tag in tags:
+        if isinstance(tag, dict):
+            name = str(tag.get("name", "") or "").strip()
+        else:
+            name = str(tag or "").strip()
+        if name:
+            names.add(name)
+    return names
+
+
+def item_has_no_prefixed_tag(item: Any, prefix: str = DEFAULT_TAG_PREFIX) -> bool:
+    """标签模式取号判据：不带任何该前缀的标签（= 从未被使用过）。"""
+    normalized_prefix = str(prefix or DEFAULT_TAG_PREFIX).strip() or DEFAULT_TAG_PREFIX
+    return not any(name.startswith(normalized_prefix) for name in tag_names(item))
+
+
+def _tag_session() -> Any:
+    """惰性创建一个用于调用标签对外 API 的会话。"""
+    global _tag_client
+    with _tag_client_lock:
+        if _tag_client is None:
+            import requests  # 局部导入：非标签模式不依赖
+
+            _tag_client = requests.Session()
+        return _tag_client
+
+
+def set_account_tags(
+    api_base: str,
+    email: str,
+    *,
+    action: str,
+    api_key: str = "",
+    tags: Optional[Iterable[str]] = None,
+    tag_prefix: str = DEFAULT_TAG_PREFIX,
+    timeout: int = 20,
+) -> dict:
+    """调用 OutlookEmail 对外标签 API。
+
+    action: add | remove | set | claim | unclaim
+    返回 {success, available?, tags?}；claim 返回 409 时以 available=False 表示已占用。
+    """
+    target = str(email or "").strip()
+    if not target:
+        raise Exception("标签操作缺少邮箱地址")
+    payload: dict[str, Any] = {
+        "email": target,
+        "action": str(action or "add").strip().lower(),
+        "tag_prefix": str(tag_prefix or DEFAULT_TAG_PREFIX).strip() or DEFAULT_TAG_PREFIX,
+    }
+    if tags is not None:
+        payload["tags"] = [str(item) for item in tags]
+    url = f"{normalize_base(api_base)}/api/external/accounts/tags"
+    session = _tag_session()
+    resp = session.post(
+        url,
+        json=payload,
+        headers=api_headers(api_key),
+        timeout=timeout,
+    )
+    try:
+        data = resp.json()
+    except Exception:
+        data = {}
+    if resp.status_code == 409:
+        return {
+            "success": True,
+            "available": False,
+            "tags": list((data or {}).get("tags") or []),
+            "status_code": 409,
+        }
+    if resp.status_code >= 400 or not isinstance(data, dict) or not data.get("success"):
+        detail = data.get("error") if isinstance(data, dict) else ""
+        raise Exception(
+            f"OutlookEmail 标签操作({payload['action']})失败: HTTP {resp.status_code} {detail or str(data)[:160]}"
+        )
+    if "available" not in data:
+        data["available"] = True
+    data["status_code"] = resp.status_code
+    return data
+
+
 def disable_account(
     http_get: HttpGet,
     session_factory: SessionFactory,
@@ -832,6 +930,8 @@ def acquire_email(
     pick_mode: str = "random",
     proxies: Optional[dict] = None,
     is_unavailable: Optional[UnavailableCheck] = None,
+    use_tags: bool = False,
+    tag_prefix: str = DEFAULT_TAG_PREFIX,
 ) -> tuple[str, str]:
     global _account_index
     normalized_source = normalize_source(source)
@@ -847,6 +947,52 @@ def acquire_email(
         )
     else:
         accounts = get_accounts(http_get, api_base, api_key, group_id=group_id)
+
+    # 标签模式：候选 = 不带任何 <prefix>* 标签的邮箱；占用靠平台 claim 原子完成。
+    if use_tags and normalized_source != "temp":
+        candidates_tags: List[dict] = []
+        for item in accounts:
+            email = item_email(item)
+            if not email or not item_has_no_prefixed_tag(item, tag_prefix):
+                continue
+            if is_unavailable:
+                try:
+                    if is_unavailable(email):
+                        continue
+                except Exception:
+                    pass
+            candidates_tags.append(item)
+        if not candidates_tags:
+            raise Exception(
+                f"OutlookEmail 没有可用的未使用邮箱（判据：不带 {tag_prefix}* 标签）"
+            )
+        if str(pick_mode or "random").strip().lower() == "random":
+            random.shuffle(candidates_tags)
+        else:
+            candidates_tags = (
+                candidates_tags[_account_index % len(candidates_tags):]
+                + candidates_tags[:_account_index % len(candidates_tags)]
+            )
+        rejected: list[str] = []
+        for item in candidates_tags:
+            email = item_email(item)
+            result = set_account_tags(
+                api_base,
+                email,
+                action="claim",
+                api_key=api_key,
+                tag_prefix=tag_prefix,
+            )
+            if result.get("available"):
+                _account_index += 1
+                with _state_lock:
+                    _reserved_emails.add(email.lower())
+                    _reserved_accounts[email.lower()] = dict(item)
+                return email, f"outlookemail:{normalized_source}:{email}"
+            rejected.append(email)
+        raise Exception(
+            f"OutlookEmail 候选邮箱均已被占用（claim 全部失败，{len(rejected)} 个）"
+        )
 
     total = 0
     active = 0

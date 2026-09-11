@@ -71,6 +71,8 @@ CONFIG_PUBLIC_KEYS = (
     "outlookemail_top",
     "outlookemail_pick_mode",
     "outlookemail_disable_after_cpa_success",
+    "outlookemail_use_tags",
+    "outlookemail_tag_prefix",
     "proxy",
     "enable_nsfw",
     "debug_mode",
@@ -364,6 +366,7 @@ def _apply_config_updates(updates: Dict[str, Any]) -> Dict[str, Any]:
             "sub2api_enabled",
             "grokiq_webhook_enabled",
             "outlookemail_disable_after_cpa_success",
+            "outlookemail_use_tags",
         ):
             value = bool(value)
         elif key in (
@@ -393,6 +396,8 @@ def _apply_config_updates(updates: Dict[str, Any]) -> Dict[str, Any]:
                 value = max(1, min(value, 32))
             elif key == "sub2api_priority":
                 value = max(-100, min(value, 100))
+        elif key == "outlookemail_tag_prefix":
+            value = str(value or "").strip()[:32] or "Grok-"
         elif key == "log_level":
             value = str(value or "info").strip().lower() or "info"
         elif key == "browser_locale":

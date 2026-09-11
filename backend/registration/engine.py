@@ -326,6 +326,11 @@ DEFAULT_CONFIG = {
     "outlookemail_top": 10,
     "outlookemail_pick_mode": "random",
     "outlookemail_disable_after_cpa_success": False,
+    # ---- 本地魔改：标签模式 ----
+    # 取号 = 不带任何 <prefix>* 标签的邮箱；占用写 <prefix>使用中；结束写 <prefix>成功/失败。
+    # 开启后平台 status 不再被修改，且与上面的 status 停用开关互斥（标签模式优先）。
+    "outlookemail_use_tags": False,
+    "outlookemail_tag_prefix": "Grok-",
     "proxy": "http://127.0.0.1:7890",
     "enable_nsfw": True,
     "debug_mode": False,
@@ -659,6 +664,53 @@ def capture_failure_screenshot(
 def is_outlookemail_registration(provider="") -> bool:
     value = str(provider or config.get("email_provider", "") or "").strip().lower()
     return value == "outlookemail"
+
+
+# ==================== 本地魔改：OutlookEmail 标签模式 ====================
+# 口径：取号=不带 <prefix>* 标签；占用=<prefix>使用中；结束=<prefix>成功 / <prefix>失败。
+# 平台 status 一律不改。与官方「CPA 成功后停用」互斥：标签模式优先。
+OUTLOOK_TAG_IN_USE = "使用中"
+OUTLOOK_TAG_SUCCESS = "成功"
+OUTLOOK_TAG_FAILED = "失败"
+
+
+def outlookemail_tags_enabled() -> bool:
+    """标签模式是否生效（仅在 outlookemail 渠道 + accounts 来源下有意义）。"""
+    if not bool(config.get("outlookemail_use_tags", False)):
+        return False
+    return is_outlookemail_registration()
+
+
+def outlookemail_tag_prefix() -> str:
+    return str(config.get("outlookemail_tag_prefix", "") or "").strip() or outlookemail_provider.DEFAULT_TAG_PREFIX
+
+
+def outlookemail_tag_name(suffix: str) -> str:
+    return f"{outlookemail_tag_prefix()}{suffix}"
+
+
+def outlookemail_set_final_tag(email: str, suffix: str, *, log_callback=None) -> dict | None:
+    """注册结束后写终态标签（成功/失败）；set 会先清掉该前缀全部标签（含「使用中」）。"""
+    normalized_email = str(email or "").strip()
+    if not normalized_email:
+        return None
+    tag = outlookemail_tag_name(suffix)
+    try:
+        result = outlookemail_provider.set_account_tags(
+            get_outlookemail_api_base(),
+            normalized_email,
+            action="set",
+            api_key=get_outlookemail_api_key(),
+            tags=[tag],
+            tag_prefix=outlookemail_tag_prefix(),
+        )
+        if log_callback:
+            log_callback(f"[+] OutlookEmail 已打标签 {tag}: {normalized_email}")
+        return {"status": "success", "tag": tag, "account_id": result.get("account_id", "")}
+    except Exception as exc:
+        if log_callback:
+            log_callback(f"[!] OutlookEmail 打标签失败({tag}): {exc}")
+        return {"status": "failed", "tag": tag, "error": str(exc)}
 
 
 def cpa_conversion_succeeded(cpa_detail=None) -> bool:
@@ -1091,6 +1143,19 @@ def disable_outlookemail_after_cpa_success(email, cpa_detail=None, log_callback=
         return detail
 
     normalized_email = str(email or "").strip()
+    if outlookemail_tags_enabled():
+        tagged = outlookemail_set_final_tag(normalized_email, OUTLOOK_TAG_SUCCESS, log_callback=log_callback)
+        if tagged is None:
+            return detail
+        detail.update(
+            status=str(tagged.get("status") or "failed"),
+            account_id=str(tagged.get("account_id") or ""),
+            disabled_at=RegistrationRepository.now_text(),
+            error=str(tagged.get("error") or ""),
+            mode="tags",
+            tag=str(tagged.get("tag") or ""),
+        )
+        return detail
     try:
         account = outlookemail_provider.account_for_email(
             http_get,
@@ -1137,6 +1202,7 @@ def maybe_disable_outlookemail_for_consumed_failure(
     *,
     reason: str = "",
     log_callback=None,
+    tag_suffix: str = OUTLOOK_TAG_FAILED,
 ) -> dict | None:
     """账号已注册、注册风控或 SSO 超时停用 Outlook 邮箱；邮箱已消耗，避免再次取用。"""
     if kind not in {FAIL_ALREADY_REGISTERED, FAIL_RISK, FAIL_SSO}:
@@ -1146,21 +1212,29 @@ def maybe_disable_outlookemail_for_consumed_failure(
     label = FAIL_LABELS.get(kind, kind)
     fail_email = str(email).strip()
     if log_callback:
-        log_callback(f"[*] {label}，按自动停用开关处理 Outlook 邮箱: {fail_email}")
+        if outlookemail_tags_enabled():
+            log_callback(f"[*] {label}，按标签模式写入 {outlookemail_tag_name(tag_suffix)}: {fail_email}")
+        else:
+            log_callback(f"[*] {label}，按自动停用开关处理 Outlook 邮箱: {fail_email}")
     detail = disable_outlookemail_consumed(
         fail_email,
         reason=reason or label,
         log_callback=log_callback,
+        tag_suffix=tag_suffix,
     )
     status = str((detail or {}).get("status") or "")
+    tagged_mode = str((detail or {}).get("mode") or "") == "tags"
     if log_callback:
         if status == "success":
-            log_callback(f"[+] {label}：Outlook 邮箱停用完成: {fail_email}")
+            if tagged_mode:
+                log_callback(f"[+] {label}：已写入标签 {(detail or {}).get('tag') or ''}: {fail_email}")
+            else:
+                log_callback(f"[+] {label}：Outlook 邮箱停用完成: {fail_email}")
         elif status == "feature_disabled":
             log_callback(f"[*] {label}：自动停用开关未开启，跳过停用 Outlook: {fail_email}")
         elif status == "failed":
             log_callback(
-                f"[!] {label}：Outlook 邮箱停用失败: {fail_email}"
+                f"[!] {label}：Outlook 邮箱{'打标签' if tagged_mode else '停用'}失败: {fail_email}"
                 f" — {(detail or {}).get('error') or ''}"
             )
     return detail
@@ -1171,11 +1245,15 @@ def disable_outlookemail_consumed(
     *,
     reason: str = "",
     log_callback=None,
+    tag_suffix: str = OUTLOOK_TAG_FAILED,
 ) -> dict:
     """在账号已存在 / 注册风控 / SSO 超时 / 已拿 SSO 等场景下停用 Outlook 邮箱，避免重复取用。
 
     与 CPA 成功后停用共用同一开关 outlookemail_disable_after_cpa_success：
     仅在开关开启且来源为 accounts 时才会远程停用。
+
+    本地魔改：开启 outlookemail_use_tags 时改为写终态标签（默认 <prefix>失败，
+    成功路径传 tag_suffix=OUTLOOK_TAG_SUCCESS），且不再修改平台 status。
     """
     if not is_outlookemail_registration():
         return default_email_disable_detail("", None)
@@ -1185,6 +1263,23 @@ def disable_outlookemail_consumed(
             "account_id": "",
             "disabled_at": "",
             "error": "",
+        }
+    if outlookemail_tags_enabled():
+        tagged = outlookemail_set_final_tag(email, tag_suffix or OUTLOOK_TAG_FAILED, log_callback=log_callback)
+        if tagged is None:
+            return {
+                "status": "failed",
+                "account_id": "",
+                "disabled_at": "",
+                "error": "缺少邮箱地址",
+            }
+        return {
+            "status": tagged.get("status") or "failed",
+            "account_id": str(tagged.get("account_id") or ""),
+            "disabled_at": RegistrationRepository.now_text(),
+            "error": str(tagged.get("error") or ""),
+            "mode": "tags",
+            "tag": tagged.get("tag") or "",
         }
     if not bool(config.get("outlookemail_disable_after_cpa_success", False)):
         if log_callback:
@@ -1283,6 +1378,8 @@ def outlookemail_get_email_and_token():
         pick_mode=str(config.get("outlookemail_pick_mode", "random") or "random"),
         proxies={},
         is_unavailable=_outlookemail_account_already_saved,
+        use_tags=outlookemail_tags_enabled(),
+        tag_prefix=outlookemail_tag_prefix(),
     )
 
 
