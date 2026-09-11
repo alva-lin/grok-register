@@ -289,3 +289,63 @@ class TagModeSuccessWriteTests(unittest.TestCase):
             "outlookemail", {"enabled": True, "status": "success"}
         )
         self.assertEqual(detail["status"], "feature_disabled")
+
+
+class FailureTagFinalizeTests(unittest.TestCase):
+    """兜底：任何失败类型都不能让邮箱停在「Grok-使用中」。
+
+    回归：aerxxsdfbl@outlook.com 因「资料页等 CF 人机验证超时」被判为
+    kind=other；maybe_disable_outlookemail_for_consumed_failure() 只覆盖
+    already_registered/risk/sso 三类 → 终态标签没写 → 邮箱永久占位。
+    """
+
+    def setUp(self):
+        self._saved = gr.config
+        gr.config = {
+            **gr.DEFAULT_CONFIG,
+            "email_provider": "outlookemail",
+            "outlookemail_source": "accounts",
+            "outlookemail_use_tags": True,
+            "outlookemail_tag_prefix": "Grok-",
+        }
+
+    def tearDown(self):
+        gr.config = self._saved
+
+    def _run(self, kind):
+        calls = []
+
+        def fake_set_final_tag(email, suffix, log_callback=None):
+            calls.append((email, suffix))
+            return {"status": "success", "tag": suffix}
+
+        with mock.patch.object(gr, "outlookemail_set_final_tag", fake_set_final_tag):
+            gr.finalize_outlookemail_failure_tag(kind, "a@x.com")
+        return calls
+
+    def test_other_failure_gets_terminal_tag(self):
+        self.assertEqual(self._run(gr.FAIL_OTHER), [("a@x.com", gr.OUTLOOK_TAG_FAILED)])
+
+    def test_code_timeout_failure_gets_terminal_tag(self):
+        # 验证码超时同样不在 maybe_disable 的三类里，也必须收口
+        self.assertEqual(self._run(gr.FAIL_CODE), [("a@x.com", gr.OUTLOOK_TAG_FAILED)])
+
+    def test_stuck_flow_failure_gets_terminal_tag(self):
+        self.assertEqual(self._run(gr.FAIL_STUCK), [("a@x.com", gr.OUTLOOK_TAG_FAILED)])
+
+    def test_browser_failure_gets_terminal_tag(self):
+        self.assertEqual(self._run(gr.FAIL_BROWSER), [("a@x.com", gr.OUTLOOK_TAG_FAILED)])
+
+    def test_handled_kinds_are_not_written_twice(self):
+        for kind in (gr.FAIL_ALREADY_REGISTERED, gr.FAIL_RISK, gr.FAIL_SSO):
+            self.assertEqual(self._run(kind), [], kind)
+
+    def test_empty_email_is_skipped(self):
+        calls = []
+        with mock.patch.object(gr, "outlookemail_set_final_tag", lambda *a, **k: calls.append(a)):
+            gr.finalize_outlookemail_failure_tag(gr.FAIL_OTHER, "   ")
+        self.assertEqual(calls, [])
+
+    def test_non_tag_mode_is_untouched(self):
+        gr.config = {**gr.config, "outlookemail_use_tags": False}
+        self.assertEqual(self._run(gr.FAIL_OTHER), [])
