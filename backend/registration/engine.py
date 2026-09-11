@@ -1026,6 +1026,22 @@ def _render_proxy_identity(template: str) -> str:
     return url
 
 
+def begin_proxy_identity_task() -> None:
+    """每个注册任务开始时调用：丢弃本线程上一个任务的身份，取新的。
+
+    为什么需要：身份是按**线程**缓存的，而 worker 线程会连续跑很多个任务。
+    如果不在任务边界清缓存，4 个 worker 跑 50 个任务只会用到
+    `grok-reg-1..4` 四条身份 → 50 个账号挤在 4 个出口 IP 上
+    （实测：50 次注册只有 10 个不同 IP，单 IP 最多 13 次），
+    身份轮换形同虚设。
+    """
+    if hasattr(_rotation_thread_state, "identity"):
+        try:
+            del _rotation_thread_state.identity
+        except AttributeError:
+            pass
+
+
 def reset_network_route_logs():
     with _network_route_log_lock:
         _network_route_log_keys.clear()
@@ -3372,6 +3388,8 @@ def run_registration(count):
                 retry = 0
                 while i < n and not controller.should_stop():
                     attempt_started_at = time.time()
+                    # 任务边界：换一条代理身份，让每个账号走不同出口 IP
+                    begin_proxy_identity_task()
                     email = ""
                     profile = {}
                     sso = ""
@@ -3672,6 +3690,8 @@ def run_registration(count):
             if controller.should_stop():
                 break
             registration_log(f"--- 开始第 {i + 1}/{count} 个账号 ---")
+            # 任务边界：换一条代理身份，让每个账号走不同出口 IP
+            begin_proxy_identity_task()
             attempt_started_at = time.time()
             email = ""
             profile = {}
