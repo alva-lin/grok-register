@@ -17,6 +17,7 @@ import unittest
 from unittest import mock
 
 from backend.mailbox import outlook_pool
+from backend.registration import engine as gr
 
 
 def account(email: str, tags=None, status: str = "active") -> dict:
@@ -236,3 +237,55 @@ class LivePlatformTagTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TagModeSuccessWriteTests(unittest.TestCase):
+    """标签模式必须独立于「CPA 成功后停用」开关完成终态回写。
+
+    回归：/app 上 CPA 成功、标签模式开启、disable_after_cpa_success=False 时，
+    default_email_disable_detail() 返回 feature_disabled，导致成功路径直接 return，
+    邮箱永久停在「Grok-使用中」。
+    """
+
+    def setUp(self):
+        self._saved = gr.config
+        gr.config = {
+            **gr.DEFAULT_CONFIG,
+            "email_provider": "outlookemail",
+            "outlookemail_source": "accounts",
+            "outlookemail_use_tags": True,
+            "outlookemail_tag_prefix": "Grok-",
+            "outlookemail_disable_after_cpa_success": False,
+            "cpa_auto_add": True,
+        }
+
+    def tearDown(self):
+        gr.config = self._saved
+
+    def test_taggable_even_when_disable_switch_is_off(self):
+        detail = gr.default_email_disable_detail(
+            "outlookemail", {"enabled": True, "status": "success"}
+        )
+        self.assertEqual(detail["status"], "not_attempted")
+
+    def test_success_path_writes_success_tag(self):
+        calls = []
+
+        def fake_set_final_tag(email, suffix, log_callback=None):
+            calls.append((email, suffix))
+            return {"status": "success", "account_id": "1", "tag": suffix}
+
+        with mock.patch.object(gr, "outlookemail_set_final_tag", fake_set_final_tag):
+            detail = gr.disable_outlookemail_after_cpa_success(
+                "a@x.com", {"enabled": True, "status": "success"}
+            )
+        self.assertEqual(calls, [("a@x.com", gr.OUTLOOK_TAG_SUCCESS)])
+        self.assertEqual(detail["status"], "success")
+        self.assertEqual(detail["mode"], "tags")
+
+    def test_non_tag_mode_still_respects_disable_switch(self):
+        gr.config = {**gr.config, "outlookemail_use_tags": False}
+        detail = gr.default_email_disable_detail(
+            "outlookemail", {"enabled": True, "status": "success"}
+        )
+        self.assertEqual(detail["status"], "feature_disabled")

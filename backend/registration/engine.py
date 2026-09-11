@@ -741,6 +741,10 @@ def default_email_disable_detail(provider="", cpa_detail=None) -> dict:
         status = "not_applicable"
     elif not cpa_conversion_succeeded(cpa_detail):
         status = "skipped_cpa"
+    elif outlookemail_tags_enabled():
+        # 标签模式下终态回写由标签接管，必须无视「CPA 成功后停用」开关，
+        # 否则 CPA 成功时既不停用也不打标签 → 邮箱永久停在「使用中」。
+        status = "not_attempted"
     elif not bool(config.get("outlookemail_disable_after_cpa_success", False)):
         status = "feature_disabled"
     elif get_outlookemail_source() != "accounts":
@@ -2876,7 +2880,24 @@ document.cookie = 'sso-rw=' + token + '; path=/; domain=.grok.com';
                     )
                 except Exception:
                     pass
-        page_obj.get("https://grok.com/")
+        # 导航到 grok.com。注意：刚拿到 sso 时页面可能还在注册跳转链上，
+        # Playwright 默认的 wait_until="load" 会被这次导航打断并抛
+        # NS_BINDING_ABORTED（实测在容器里稳定复现）。这里只等 commit
+        # （导航已提交即可），后面已有轮询等 CF 挑战结束，且真正要做的是
+        # 页面内的 fetch，不依赖完整 load。
+        last_nav_error = None
+        for attempt in range(2):
+            try:
+                page_obj.get("https://grok.com/", wait_until="commit")
+                last_nav_error = None
+                break
+            except Exception as exc:  # noqa: BLE001 - 轮询兜底，导航被打断不算致命
+                last_nav_error = exc
+                if log_callback:
+                    log_callback(f"[Debug] 打开 grok.com 被中断（第 {attempt + 1}/2 次）: {exc}")
+                time.sleep(1.5)
+        if last_nav_error is not None and log_callback:
+            log_callback("[!] grok.com 导航两次都被中断，继续轮询页面状态")
         try:
             page_obj.wait.doc_loaded()
         except Exception:
