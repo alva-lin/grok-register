@@ -951,6 +951,9 @@ EXTENSION_PATH = ""
 
 DUCKMAIL_API_BASE_DEFAULT = duckmail_provider.API_BASE_DEFAULT
 
+# 开启 NSFW 前等注册跳转链落定的秒数（用户口径：可接受这个延时）。
+NSFW_NAV_SETTLE_SECONDS = 5.0
+
 
 def get_proxies():
     template = resolve_proxy_url(config.get("proxy", ""))
@@ -1318,6 +1321,45 @@ def maybe_disable_outlookemail_for_consumed_failure(
                 f" — {(detail or {}).get('error') or ''}"
             )
     return detail
+
+
+def finalize_outlookemail_failure_tag(
+    kind,
+    email,
+    *,
+    reason: str = "",
+    log_callback=None,
+    tag_suffix: str = OUTLOOK_TAG_FAILED,
+) -> dict | None:
+    """兜底：任何失败类型都要把邮箱落到终态标签，不让它停在「使用中」。
+
+    背景（实测）：`maybe_disable_outlookemail_for_consumed_failure()` 只处理
+    已注册 / 风控 / SSO 超时三类；被判为「其它」的失败（例如资料页一直在等
+    Cloudflare 人机验证直到超时）会跳过终态回写，邮箱就永久停在
+    `Grok-使用中` —— 既不能再取号，也不是可用状态。
+
+    标签模式下「使用中」是唯一的占位状态，终态必须收口，所以这里对所有
+    失败类型补齐；非标签模式的行为完全不变。
+    """
+    if not outlookemail_tags_enabled():
+        return None
+    handled = {FAIL_ALREADY_REGISTERED, FAIL_RISK, FAIL_SSO}
+    if kind in handled:
+        # 这三类已由 maybe_disable_... 写过终态，不重复写
+        return None
+    if not str(email or "").strip():
+        return None
+    label = FAIL_LABELS.get(kind, kind)
+    fail_email = str(email).strip()
+    if log_callback:
+        log_callback(
+            f"[*] {label}失败兜底：写入 {outlookemail_tag_name(tag_suffix)}: {fail_email}"
+        )
+    detail = outlookemail_set_final_tag(fail_email, tag_suffix, log_callback=log_callback)
+    if detail is None:
+        return None
+    if log_callback and str(detail.get("status") or "") == "success":
+        log_callback(f"[+] {label}失败：已写入标签 {detail.get('tag') or ''}: {fail_email}")
 
 
 def disable_outlookemail_consumed(
@@ -2880,34 +2922,17 @@ document.cookie = 'sso-rw=' + token + '; path=/; domain=.grok.com';
                     )
                 except Exception:
                     pass
-        # 导航到 grok.com。刚拿到 sso 时页面还在注册跳转链上，直接导航会被
+        # 导航到 grok.com。刚拿到 sso 时页面还在注册跳转链上，立刻导航会被
         # 那次未结束的跳转打断并抛 NS_BINDING_ABORTED（实测稳定复现：
-        # 3/3 个账号第 1 次都被中断，第 2 次才成功）。Playwright 默认的
-        # wait_until="load" 更等不起，这里改三步走：
-        #   1) 先轮询 document.readyState，等页面自身跳转落定（最多 ~4.5s）
-        #   2) 导航只等 commit（导航已提交即可）
-        #   3) 仍被中断就重试一次，并交给后面的 CF 轮询兜底
-        # 真正常用的是页面内 fetch，不依赖完整 load。
-        for _ in range(9):
-            try:
-                if str(page_obj.run_js("return document.readyState || '';") or "") == "complete":
-                    break
-            except Exception:
-                break
-            time.sleep(0.5)
-        last_nav_error = None
-        for attempt in range(2):
-            try:
-                page_obj.get("https://grok.com/", wait_until="commit")
-                last_nav_error = None
-                break
-            except Exception as exc:  # noqa: BLE001 - 轮询兜底，导航被打断不算致命
-                last_nav_error = exc
-                if log_callback:
-                    log_callback(f"[Debug] 打开 grok.com 被中断（第 {attempt + 1}/2 次）: {exc}")
-                time.sleep(1.5)
-        if last_nav_error is not None and log_callback:
-            log_callback("[!] grok.com 导航两次都被中断，继续轮询页面状态")
+        # 3/3 个账号都撞上）。这里按用户口径**固定等待 5 秒**让跳转落定，
+        # 只导航一次、不再重试——宁可慢这 5 秒，也不要那次必失败的首跳。
+        # 真正常用的是后面的页面内 fetch，不依赖完整 load。
+        time.sleep(NSFW_NAV_SETTLE_SECONDS)
+        try:
+            page_obj.get("https://grok.com/", wait_until="commit")
+        except Exception as exc:  # noqa: BLE001 - 后面有 CF 轮询兜底，导航失败不致命
+            if log_callback:
+                log_callback(f"[Debug] 打开 grok.com 被中断: {exc}")
         try:
             page_obj.wait.doc_loaded()
         except Exception:
@@ -3559,6 +3584,12 @@ def run_registration(count):
                             reason=f"{FAIL_LABELS.get(kind, kind)}: {exc}",
                             log_callback=lambda m: registration_log(f"[W{wid+1}] {m}"),
                         )
+                        finalize_outlookemail_failure_tag(
+                            kind,
+                            fail_email,
+                            reason=f"{FAIL_LABELS.get(kind, kind)}: {exc}",
+                            log_callback=lambda m: registration_log(f"[W{wid+1}] {m}"),
+                        )
                         _persist_result(
                             started_at=attempt_started_at,
                             worker_id=wid,
@@ -3892,6 +3923,12 @@ def run_registration(count):
                     )
                 fail_email = current_attempt_email(email, exc)
                 email_disable_detail = maybe_disable_outlookemail_for_consumed_failure(
+                    kind,
+                    fail_email,
+                    reason=f"{FAIL_LABELS.get(kind, kind)}: {exc}",
+                    log_callback=registration_log,
+                )
+                finalize_outlookemail_failure_tag(
                     kind,
                     fail_email,
                     reason=f"{FAIL_LABELS.get(kind, kind)}: {exc}",
