@@ -2880,11 +2880,21 @@ document.cookie = 'sso-rw=' + token + '; path=/; domain=.grok.com';
                     )
                 except Exception:
                     pass
-        # 导航到 grok.com。注意：刚拿到 sso 时页面可能还在注册跳转链上，
-        # Playwright 默认的 wait_until="load" 会被这次导航打断并抛
-        # NS_BINDING_ABORTED（实测在容器里稳定复现）。这里只等 commit
-        # （导航已提交即可），后面已有轮询等 CF 挑战结束，且真正要做的是
-        # 页面内的 fetch，不依赖完整 load。
+        # 导航到 grok.com。刚拿到 sso 时页面还在注册跳转链上，直接导航会被
+        # 那次未结束的跳转打断并抛 NS_BINDING_ABORTED（实测稳定复现：
+        # 3/3 个账号第 1 次都被中断，第 2 次才成功）。Playwright 默认的
+        # wait_until="load" 更等不起，这里改三步走：
+        #   1) 先轮询 document.readyState，等页面自身跳转落定（最多 ~4.5s）
+        #   2) 导航只等 commit（导航已提交即可）
+        #   3) 仍被中断就重试一次，并交给后面的 CF 轮询兜底
+        # 真正常用的是页面内 fetch，不依赖完整 load。
+        for _ in range(9):
+            try:
+                if str(page_obj.run_js("return document.readyState || '';") or "") == "complete":
+                    break
+            except Exception:
+                break
+            time.sleep(0.5)
         last_nav_error = None
         for attempt in range(2):
             try:
