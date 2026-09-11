@@ -74,6 +74,9 @@ CONFIG_PUBLIC_KEYS = (
     "outlookemail_use_tags",
     "outlookemail_tag_prefix",
     "proxy",
+    "register_proxy_identity_rotation",
+    "register_proxy_identity_pool",
+    "register_proxy_identity_base",
     "enable_nsfw",
     "debug_mode",
     "browser_engine",
@@ -367,6 +370,7 @@ def _apply_config_updates(updates: Dict[str, Any]) -> Dict[str, Any]:
             "grokiq_webhook_enabled",
             "outlookemail_disable_after_cpa_success",
             "outlookemail_use_tags",
+            "register_proxy_identity_rotation",
         ):
             value = bool(value)
         elif key in (
@@ -398,6 +402,10 @@ def _apply_config_updates(updates: Dict[str, Any]) -> Dict[str, Any]:
                 value = max(-100, min(value, 100))
         elif key == "outlookemail_tag_prefix":
             value = str(value or "").strip()[:32] or "Grok-"
+        elif key == "register_proxy_identity_pool":
+            value = str(value or "")[:8192]
+        elif key == "register_proxy_identity_base":
+            value = str(value or "").strip()[:64] or "grok-reg"
         elif key == "log_level":
             value = str(value or "info").strip().lower() or "info"
         elif key == "browser_locale":

@@ -332,6 +332,13 @@ DEFAULT_CONFIG = {
     "outlookemail_use_tags": False,
     "outlookemail_tag_prefix": "Grok-",
     "proxy": "http://127.0.0.1:7890",
+    # ---- 本地魔改：注册代理身份轮换 ----
+    # proxy 里含 {account} 时开启本项，则在用户名处按任务填入身份池里的下一条。
+    # 池子来源：identity_pool（每行一条，留空则按 identity_base 自动生成 -1..-500）。
+    # 同一个注册任务全程共用一条身份（按线程缓存），任务之间换身份 = 换出口 IP。
+    "register_proxy_identity_rotation": False,
+    "register_proxy_identity_pool": "",
+    "register_proxy_identity_base": "grok-reg",
     "enable_nsfw": True,
     "debug_mode": False,
     "browser_engine": _bs.normalize_browser_engine(
@@ -942,10 +949,74 @@ DUCKMAIL_API_BASE_DEFAULT = duckmail_provider.API_BASE_DEFAULT
 
 
 def get_proxies():
-    proxy = resolve_proxy_url(config.get("proxy", ""))
+    template = resolve_proxy_url(config.get("proxy", ""))
+    if not template:
+        return {}
+    proxy = _render_proxy_identity(template) if proxy_identity_rotation_enabled() else template
     if proxy:
         return {"http": proxy, "https": proxy}
     return {}
+
+
+# ---- 本地魔改：注册代理身份轮换 ----
+# proxy 里写 {account} 占位符时，把每个注册任务分配到代理池里的一条身份
+# （如 resin 的 `Platform.Account`），同一个任务内所有出站请求共用一条身份。
+ROTATION_PLACEHOLDER = "{account}"
+_ROTATION_IDENTITY_MAX = 64
+_rotation_lock = threading.Lock()
+_rotation_counter: dict[str, int] = {}
+_rotation_thread_state = threading.local()
+
+
+def proxy_identity_rotation_enabled() -> bool:
+    """是否按任务轮换代理身份。"""
+    if not bool(config.get("register_proxy_identity_rotation", False)):
+        return False
+    return ROTATION_PLACEHOLDER in str(config.get("proxy", "") or "")
+
+
+def proxy_identity_pool() -> list[str]:
+    """取身份池；留空则按基准名自动生成 ``<basename>-1..N``。"""
+    base = str(config.get("register_proxy_identity_base", "") or "").strip() or "grok-reg"
+    base = re.sub(r"[^A-Za-z0-9_-]", "", base)[:_ROTATION_IDENTITY_MAX] or "grok-reg"
+    identities = [
+        item.strip()
+        for item in re.split(r"[\s,;]+", str(config.get("register_proxy_identity_pool", "") or ""))
+        if item.strip()
+    ]
+    if identities:
+        identities = [
+            re.sub(r"[^A-Za-z0-9_.-]", "", identity)[:_ROTATION_IDENTITY_MAX]
+            for identity in identities
+        ]
+        identities = [identity for identity in identities if identity]
+        if identities:
+            return identities
+    return [f"{base}-{index}" for index in range(1, 501)]
+
+
+def next_proxy_identity(template: str) -> str:
+    """按任务顺序取下一条身份；池子用完后回到开头循环。"""
+    pool = proxy_identity_pool()
+    with _rotation_lock:
+        index = _rotation_counter.get(template, 0)
+        _rotation_counter[template] = index + 1
+    return pool[index % len(pool)]
+
+
+def _render_proxy_identity(template: str) -> str:
+    """给当前注册任务分配（并缓存）代理身份。
+
+    同一个任务会多次调用 :func:`get_proxies`（浏览器、NSFW、CPA 等），
+    身份按线程缓存，保证一个任务全程走同一个出口 IP。
+    """
+    key = f"{threading.get_ident()}:{template}"
+    cached = getattr(_rotation_thread_state, "identity", None)
+    if isinstance(cached, dict) and cached.get("key") == key:
+        return str(cached.get("url") or "")
+    url = template.replace(ROTATION_PLACEHOLDER, next_proxy_identity(template))
+    _rotation_thread_state.identity = {"key": key, "url": url}
+    return url
 
 
 def reset_network_route_logs():
